@@ -1,5 +1,3 @@
-@~/.claude/docs/node-operating.md
-
 # Movie Recommendation App v2 — Node Operating Manual
 
 ## Project Overview
@@ -8,11 +6,6 @@ Movie Recommendation App v2 based on The Divide (2011). Curated deep-cut movies 
 **Repo:** disp-leg/movie-rec-v2
 **Deploy:** Netlify (auto on push)
 **CI/CD from day one.**
-
----
-
-## MSAP Context
-This is an MSAP project node. All operator communication goes through Yuna (hub). Do NOT access Telegram directly. If blocked, signal Yuna to ask operators.
 
 ---
 
@@ -105,10 +98,8 @@ Review Agent + operator final approval → Railway production deploy.
 
 ## Communication
 
-- Node reports to Yuna (hub) at each gate
-- Yuna relays to operators on Telegram
-- Node **NEVER** contacts operators directly
-- If blocked, signal Yuna to ask operators
+- Report to the operator directly in the session at each gate
+- If blocked, ask the operator
 
 ---
 
@@ -203,8 +194,8 @@ Keypad, shader, skeuomorphism, swipe, throw
 ## Approval Scope
 
 **You decide (Level 1):** Implementation approach, animation choices, component structure, test strategy
-**Escalate to liaison (Level 2):** Additional agents, scope changes, timeline extensions >25%
-**Escalate to Yuna/operators (Level 3):** Phase gate approvals, completion, abort
+**Ask the operator (Level 2):** Additional agents, scope changes, timeline extensions >25%
+**Operator approval (Level 3):** Phase gate approvals, completion, abort
 
 ## Pre-Graduation Self-Review
 
