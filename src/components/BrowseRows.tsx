@@ -169,7 +169,7 @@ export default function BrowseRows({ movies, dials, onSelect }: BrowseRowsProps)
               }}
             >
               {filtered.map((movie) => (
-                <div key={movie.title} style={{ scrollSnapAlign: "start" }}>
+                <div key={movie.id} style={{ scrollSnapAlign: "start" }}>
                   <PosterCard movie={movie} onSelect={onSelect} />
                 </div>
               ))}

@@ -84,7 +84,7 @@ export default function FreshStrip({ movies, onSelect }: FreshStripProps) {
 
           return (
             <button
-              key={movie.title}
+              key={movie.id}
               onClick={() => onSelect(movie)}
               style={{
                 flexShrink: 0,

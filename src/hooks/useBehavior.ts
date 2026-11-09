@@ -10,15 +10,17 @@ import {
   toggleSignal,
   recordSignal,
   rankMovies,
+  migrateTitleKeys,
 } from "../lib/behavior";
 
 export function useBehavior(movies: Movie[]) {
   const [state, setState] = useState<BehaviorState | null>(null);
 
-  // Load from localStorage on mount (client-side only)
+  // Load from localStorage on mount (client-side only); legacy title keys
+  // are re-keyed to film IDs and persisted by the auto-save below.
   useEffect(() => {
-    setState(loadBehavior());
-  }, []);
+    setState(migrateTitleKeys(loadBehavior(), movies));
+  }, [movies]);
 
   // Auto-save to localStorage on every state change
   useEffect(() => {
@@ -44,40 +46,40 @@ export function useBehavior(movies: Movie[]) {
   }, [movies, state]);
 
   const save = useCallback(
-    (title: string) => {
+    (filmId: string) => {
       setState((prev) => {
         if (!prev) return prev;
-        return toggleSignal(prev, title, "save");
+        return toggleSignal(prev, filmId, "save");
       });
     },
     []
   );
 
   const skip = useCallback(
-    (title: string) => {
+    (filmId: string) => {
       setState((prev) => {
         if (!prev) return prev;
-        return toggleSignal(prev, title, "skip");
+        return toggleSignal(prev, filmId, "skip");
       });
     },
     []
   );
 
   const markSeen = useCallback(
-    (title: string) => {
+    (filmId: string) => {
       setState((prev) => {
         if (!prev) return prev;
-        return recordSignal(prev, title, "seen");
+        return recordSignal(prev, filmId, "seen");
       });
     },
     []
   );
 
   const recordExpand = useCallback(
-    (title: string) => {
+    (filmId: string) => {
       setState((prev) => {
         if (!prev) return prev;
-        return recordSignal(prev, title, "expand");
+        return recordSignal(prev, filmId, "expand");
       });
     },
     []
@@ -102,6 +104,7 @@ export function useBehavior(movies: Movie[]) {
 
   return {
     rankedMovies,
+    hydrated: state !== null,
     save,
     skip,
     markSeen,

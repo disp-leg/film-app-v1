@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import HeroSection from "@/components/HeroSection";
 import BrowseRows from "@/components/BrowseRows";
 import TabBar from "@/components/TabBar";
@@ -14,7 +14,8 @@ import { DialState, DEFAULT_DIALS } from "@/lib/engine-types";
 import { loadDials, saveDials } from "@/lib/dials";
 
 export default function Home() {
-  const { rankedMovies, save, markSeen, recordExpand } = useBehavior(movies);
+  const { rankedMovies, hydrated, save, markSeen, recordExpand } = useBehavior(movies);
+  const rankedFeed = useMemo(() => rankedMovies.map((rm) => rm.movie), [rankedMovies]);
   const [selectedMovie, setSelectedMovie] = useState<Movie | null>(null);
   const [activeTab, setActiveTab] = useState<string>("home");
   const [dials, setDials] = useState<DialState>(DEFAULT_DIALS);
@@ -76,19 +77,22 @@ export default function Home() {
 
       {showDials && <IntensityDials dials={dials} onChange={handleDialChange} />}
 
+      {/* Remount once personalized ranking loads: mandatory scroll-snap would
+          otherwise re-snap each row to the tile that was first before ranking. */}
       <BrowseRows
-        movies={movies}
+        key={hydrated ? "ranked" : "pre-hydration"}
+        movies={rankedFeed}
         dials={dials}
         onSelect={(movie) => {
           setSelectedMovie(movie);
-          recordExpand(movie.title);
+          recordExpand(movie.id);
         }}
       />
       <WatchedLedger
         movies={movies}
         onSelect={(movie) => {
           setSelectedMovie(movie);
-          recordExpand(movie.title);
+          recordExpand(movie.id);
         }}
       />
       <TabBar activeTab={activeTab} onTabChange={setActiveTab} />
@@ -96,10 +100,10 @@ export default function Home() {
         <DetailOverlay
           movie={selectedMovie}
           onClose={() => setSelectedMovie(null)}
-          onSave={() => save(selectedMovie.title)}
-          onMarkSeen={() => markSeen(selectedMovie.title)}
+          onSave={() => save(selectedMovie.id)}
+          onMarkSeen={() => markSeen(selectedMovie.id)}
           isSaved={
-            rankedMovies.find((rm) => rm.movie.title === selectedMovie.title)
+            rankedMovies.find((rm) => rm.movie.id === selectedMovie.id)
               ?.isSaved || false
           }
         />

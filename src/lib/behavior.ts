@@ -1,4 +1,4 @@
-import { Movie } from "./types";
+import type { Movie } from "./types";
 
 // --- Interfaces ---
 
@@ -12,7 +12,7 @@ export interface MovieSignals {
 }
 
 export interface BehaviorState {
-  signals: Record<string, MovieSignals>; // keyed by movie title
+  signals: Record<string, MovieSignals>; // keyed by stable canonical film ID
   lastUpdated: string; // ISO date
 }
 
@@ -53,9 +53,20 @@ function createDefaultState(): BehaviorState {
 
 function getOrCreateSignals(
   state: BehaviorState,
-  movieTitle: string
+  filmId: string
 ): MovieSignals {
-  return state.signals[movieTitle] ?? createDefaultSignals();
+  return state.signals[filmId] ?? createDefaultSignals();
+}
+
+// Keep the most recent toggle state; never lose expand history.
+function mergeSignals(a: MovieSignals, b: MovieSignals): MovieSignals {
+  const newer = a.lastInteracted >= b.lastInteracted ? a : b;
+  return {
+    ...newer,
+    expandCount: Math.max(a.expandCount, b.expandCount),
+    firstInteracted:
+      a.firstInteracted <= b.firstInteracted ? a.firstInteracted : b.firstInteracted,
+  };
 }
 
 function isWithinDays(dateStr: string | undefined, days: number): boolean {
@@ -94,6 +105,34 @@ export function loadBehavior(): BehaviorState {
 }
 
 /**
+ * Re-key legacy title-keyed signals to stable canonical film IDs.
+ * A title migrates only when exactly one movie carries it; ambiguous or
+ * unknown titles stay as-is (inert) rather than being guessed onto a film.
+ * Returns the same object when nothing needs to change.
+ */
+export function migrateTitleKeys(
+  state: BehaviorState,
+  movies: Movie[]
+): BehaviorState {
+  const ids = new Set(movies.map((m) => m.id));
+  const idsByTitle = new Map<string, string[]>();
+  for (const m of movies) {
+    idsByTitle.set(m.title, [...(idsByTitle.get(m.title) ?? []), m.id]);
+  }
+
+  let changed = false;
+  const signals: Record<string, MovieSignals> = {};
+  for (const [key, value] of Object.entries(state.signals)) {
+    const matches = ids.has(key) ? [key] : idsByTitle.get(key) ?? [];
+    const target = matches.length === 1 ? matches[0] : key;
+    if (target !== key) changed = true;
+    signals[target] = signals[target] ? mergeSignals(signals[target], value) : value;
+  }
+
+  return changed ? { ...state, signals } : state;
+}
+
+/**
  * Save state to localStorage.
  * No-op during SSR.
  */
@@ -116,10 +155,10 @@ export function saveBehavior(state: BehaviorState): void {
  */
 export function recordSignal(
   state: BehaviorState,
-  movieTitle: string,
+  filmId: string,
   signal: "save" | "skip" | "seen" | "expand"
 ): BehaviorState {
-  const existing = getOrCreateSignals(state, movieTitle);
+  const existing = getOrCreateSignals(state, filmId);
   const now = new Date().toISOString();
 
   let updated: MovieSignals;
@@ -144,7 +183,7 @@ export function recordSignal(
   }
 
   // If this is the first interaction, set firstInteracted
-  if (!state.signals[movieTitle]) {
+  if (!state.signals[filmId]) {
     updated.firstInteracted = now;
   }
 
@@ -152,7 +191,7 @@ export function recordSignal(
     ...state,
     signals: {
       ...state.signals,
-      [movieTitle]: updated,
+      [filmId]: updated,
     },
     lastUpdated: now,
   };
@@ -163,10 +202,10 @@ export function recordSignal(
  */
 export function toggleSignal(
   state: BehaviorState,
-  movieTitle: string,
+  filmId: string,
   signal: "save" | "skip"
 ): BehaviorState {
-  const existing = getOrCreateSignals(state, movieTitle);
+  const existing = getOrCreateSignals(state, filmId);
   const now = new Date().toISOString();
 
   const updated: MovieSignals = {
@@ -176,7 +215,7 @@ export function toggleSignal(
     lastInteracted: now,
   };
 
-  if (!state.signals[movieTitle]) {
+  if (!state.signals[filmId]) {
     updated.firstInteracted = now;
   }
 
@@ -184,7 +223,7 @@ export function toggleSignal(
     ...state,
     signals: {
       ...state.signals,
-      [movieTitle]: updated,
+      [filmId]: updated,
     },
     lastUpdated: now,
   };
@@ -202,9 +241,9 @@ export function rankMovies(
 ): RankedMovie[] {
   // Collect DNA tags from all saved movies for similarity boost
   const savedDnaTags = new Set<string>();
-  for (const [title, signals] of Object.entries(state.signals)) {
+  for (const [filmId, signals] of Object.entries(state.signals)) {
     if (signals.saved) {
-      const movie = movies.find((m) => m.title === title);
+      const movie = movies.find((m) => m.id === filmId);
       if (movie) {
         movie.dna.forEach((tag) => savedDnaTags.add(tag));
       }
@@ -214,7 +253,7 @@ export function rankMovies(
   const ranked: RankedMovie[] = [];
 
   for (const movie of movies) {
-    const signals = state.signals[movie.title];
+    const signals = state.signals[movie.id];
     const isSeen = signals?.seen ?? false;
     const isSaved = signals?.saved ?? false;
     const isSkipped = signals?.skipped ?? false;

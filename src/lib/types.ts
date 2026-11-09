@@ -10,6 +10,7 @@ export interface Letterboxd {
 }
 
 export interface Movie {
+  id: string; // stable canonical film ID from content-engine films.jsonl
   title: string;
   year: number;
   director: string;

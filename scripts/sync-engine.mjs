@@ -73,9 +73,25 @@ function compositeScore(record) {
   ) / 100;
 }
 
+// Mirrors content-engine scripts/film_lib.py derive_status() exactly:
+// quarantined > dnr > dnf > watched > retired > reviewed > eligible.
+// A Letterboxd URI is source provenance, not evidence that a film was watched.
 function canonicalStatus(record) {
-  return canonicalExclusionStatus(record) ||
-    (String(record.status || "").toUpperCase() === "REVIEWED" ? "REVIEWED" : "ELIGIBLE");
+  const medium = record.medium === undefined ? "film" : record.medium;
+  if (record.quarantined || medium !== "film") return "QUARANTINED";
+  const operator = record.operator;
+  const has = (obj, key) => obj !== null && typeof obj === "object" && key in obj;
+  if (!has(operator, "watched") || !has(operator, "reviewed") ||
+      !has(operator.dnr, "value") || !has(operator.dnf, "value")) {
+    // derive_status raises KeyError here; never default a malformed record to ELIGIBLE.
+    throw new Error(`Cannot derive status for ${record.id}: operator lifecycle fields missing`);
+  }
+  if (operator.dnr.value) return "DNR";
+  if (operator.dnf.value) return "DNF";
+  if (operator.watched) return "WATCHED";
+  if (operator.retired?.value) return "RETIRED";
+  if (operator.reviewed) return "REVIEWED";
+  return "ELIGIBLE";
 }
 
 function hasRecommendationData(record) {
@@ -98,18 +114,17 @@ const HARD_EXCLUSION_STATUSES = new Set([
 ]);
 
 function canonicalExclusionStatus(record) {
-  const operator = record.operator || {};
-  if (record.quarantined || (record.medium && record.medium !== "film")) return "QUARANTINED";
-  if (operator.dnr?.value) return "DNR";
-  if (operator.dnf?.value) return "DNF";
-  if (operator.watched || record.availability?.letterboxd_uri) return "WATCHED";
-  if (operator.retired?.value) return "RETIRED";
-
-  const storedStatus = String(record.status || "").toUpperCase();
-  return HARD_EXCLUSION_STATUSES.has(storedStatus) ? storedStatus : null;
+  const status = canonicalStatus(record);
+  return HARD_EXCLUSION_STATUSES.has(status) ? status : null;
 }
 
 function findCanonicalExclusion(movie, exclusions) {
+  // A stable canonical ID is authoritative: a title/alias/external-ID collision
+  // with a different record must never exclude (or include) this film.
+  if (movie.id && exclusions.statusById.has(movie.id)) {
+    return exclusions.statusById.get(movie.id);
+  }
+
   const tmdbId = normalizeExternalId(
     movie.tmdbId ?? movie.tmdb_id ?? movie.external_ids?.tmdb
   );
@@ -161,6 +176,14 @@ function parseCanonicalRecords(source, sourceName = "films.jsonl") {
     if (typeof record.id !== "string" || !record.id || ids.has(record.id)) {
       throw new Error(`Missing or duplicate id in ${sourceName}:${index + 1}`);
     }
+    // Refuse to sync if this mirror and the canonical classifier disagree.
+    const derived = canonicalStatus(record).toLowerCase();
+    if (record.status !== derived) {
+      throw new Error(
+        `Status ${JSON.stringify(record.status)} != derived ${JSON.stringify(derived)} ` +
+        `in ${sourceName}:${index + 1}; run content-engine scripts/validate_store.py`
+      );
+    }
     ids.add(record.id);
     records.push(record);
   }
@@ -175,9 +198,11 @@ function loadCanonicalExclusions(records) {
     byTitleYear: new Map(),
     byTmdbId: new Map(),
     byImdbId: new Map(),
+    statusById: new Map(),
   };
   for (const record of records) {
     const status = canonicalExclusionStatus(record);
+    exclusions.statusById.set(record.id, status);
     if (status) {
       const tmdbId = normalizeExternalId(record.tmdb_id ?? record.external_ids?.tmdb);
       if (tmdbId) exclusions.byTmdbId.set(tmdbId, status);
@@ -207,8 +232,10 @@ function loadCanonicalExclusions(records) {
 
 // --- Merge canonical engine data onto movies ---
 function enrichWithEngine(movies, canonicalRecords, canonicalExclusions) {
+  const engineById = new Map();
   const engineByKey = new Map();
   for (const record of canonicalRecords) {
+    engineById.set(record.id, record);
     engineByKey.set(makeKey(record.title, record.year), record);
     if (record.original_title) {
       engineByKey.set(makeKey(record.original_title, record.year), record);
@@ -223,8 +250,9 @@ function enrichWithEngine(movies, canonicalRecords, canonicalExclusions) {
   for (const movie of movies) {
     const key = makeKey(movie.title, movie.year);
 
-    // Engine enrichment
-    const record = engineByKey.get(key);
+    // Engine enrichment. A movie with a stable ID only ever reads its own record;
+    // title/alias keys collide across films and would graft on another film's status.
+    const record = movie.id ? engineById.get(movie.id) : engineByKey.get(key);
     if (record && hasRecommendationData(record)) {
       const scores = record.scores || {};
       movie.scary = numeric(scores.dread) ?? movie.scary;
@@ -316,6 +344,7 @@ function engineToMovies(canonicalRecords, existingKeys) {
     const composite = compositeScore(record);
 
     newMovies.push({
+      id: record.id,
       title: record.title,
       year: record.year,
       director: record.intrinsic?.director || "",
@@ -353,9 +382,8 @@ function engineToMovies(canonicalRecords, existingKeys) {
   return newMovies;
 }
 
-// --- Main ---
-function main() {
-  const canonicalRecords = loadCanonicalRecords();
+// --- Canonical records -> app payload (the whole pipeline, exported for tests) ---
+function buildMoviePayload(canonicalRecords) {
   const canonicalExclusions = loadCanonicalExclusions(canonicalRecords);
   const recommendationRecords = canonicalRecords.filter(
     (record) => !canonicalExclusionStatus(record) && hasRecommendationData(record)
@@ -381,6 +409,12 @@ function main() {
 
   console.log(`${beforeExclusions - allMovies.length} hard-excluded movies removed`);
   console.log(`${allMovies.length} movies after visibility and exclusion filters`);
+  return allMovies;
+}
+
+// --- Main ---
+function main() {
+  const allMovies = buildMoviePayload(loadCanonicalRecords());
 
   // Ensure output directory exists
   const outputDir = dirname(OUTPUT_PATH);
@@ -397,6 +431,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
 }
 
 export {
+  buildMoviePayload,
   canonicalExclusionStatus,
   engineToMovies,
   findCanonicalExclusion,
