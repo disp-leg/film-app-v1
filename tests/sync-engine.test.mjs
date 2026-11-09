@@ -56,6 +56,26 @@ test("alias matching enforces canonical exclusions", () => {
   assert.equal(canonicalExclusionStatus(watched), "WATCHED");
 });
 
+test("operator DNF and retired decisions are hard exclusions", () => {
+  const dnf = record({
+    id: "dnf-2020",
+    operator: {
+      watched: false, reviewed: true, dnf: { value: true },
+      dnr: { value: false }, retired: { value: false },
+    },
+  });
+  const retired = record({
+    id: "retired-2020",
+    operator: {
+      watched: false, reviewed: true, dnf: { value: false },
+      dnr: { value: false }, retired: { value: true },
+    },
+  });
+
+  assert.equal(canonicalExclusionStatus(dnf), "DNF");
+  assert.equal(canonicalExclusionStatus(retired), "RETIRED");
+});
+
 test("movie payload is generated only from supplied canonical records", () => {
   const canonical = [record(), record({ id: "second-2021", title: "Second", year: 2021 })];
   const movies = engineToMovies(canonical, new Set());
