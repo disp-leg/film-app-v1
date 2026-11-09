@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
  * sync-engine.mjs
- * Reads content-engine horror-100.json + canonical films.jsonl + existing movie batches,
- * merges into a single src/data/engine-movies.json matching the Movie type.
+ * Reads canonical content-engine films.jsonl and emits a single
+ * src/data/engine-movies.json matching the Movie type.
  *
  * Run: node scripts/sync-engine.mjs
  * Or:  npm run sync
@@ -17,10 +17,7 @@ const PROJECT_ROOT = resolve(__dirname, "..");
 const ENGINE_ROOT = resolve(PROJECT_ROOT, "../content-engine");
 
 // --- Paths ---
-const HORROR_100_PATH = resolve(ENGINE_ROOT, "horror-100.json");
 const FILMS_JSONL_PATH = resolve(ENGINE_ROOT, "data/films.jsonl");
-const BATCH2_PATH = resolve(PROJECT_ROOT, "data/movies-batch2.json");
-const MOVIES_JSON_PATH = resolve(PROJECT_ROOT, "data/movies.json");
 const OUTPUT_PATH = resolve(PROJECT_ROOT, "src/data/engine-movies.json");
 
 // --- Helpers ---
@@ -34,6 +31,62 @@ function makeKey(title, year) {
 
 function normalizeExternalId(value) {
   return value == null || value === "" ? null : String(value).toLowerCase();
+}
+
+function numeric(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function paceLabel(value) {
+  const score = numeric(value);
+  if (score == null) return undefined;
+  if (score >= 7) return "fast";
+  if (score <= 3) return "slow";
+  return "medium";
+}
+
+function defaultVisible(record) {
+  const intrinsic = record.intrinsic || {};
+  const englishDub = record.availability?.english_dub;
+  const language = String(intrinsic.language || "").trim().toLowerCase();
+
+  if (intrinsic.is_english === true || language === "english") return true;
+  if (englishDub === "native" || englishDub === "dub_available") return true;
+  if (englishDub === "subs_only" || intrinsic.is_english === false) return false;
+  return true;
+}
+
+function compositeScore(record) {
+  const scores = record.scores || {};
+  const scary = numeric(scores.dread);
+  const extreme = numeric(scores.intensity);
+  const production = numeric(scores.production);
+  const pace = numeric(scores.pace);
+  if ([scary, extreme, production, pace].some((value) => value == null)) return null;
+
+  const paceBonus = pace >= 7 ? 5 : pace <= 3 ? 0 : 3;
+  const mpaaBonus = ["r", "unrated_or_adult"].includes(record.availability?.mpaa_ladder)
+    ? 0.5
+    : 0;
+  return Math.round(
+    (scary * 0.5 + extreme * 0.15 + production * 0.25 + paceBonus * 0.1 + mpaaBonus) * 100
+  ) / 100;
+}
+
+function canonicalStatus(record) {
+  return canonicalExclusionStatus(record) ||
+    (String(record.status || "").toUpperCase() === "REVIEWED" ? "REVIEWED" : "ELIGIBLE");
+}
+
+function hasRecommendationData(record) {
+  const scores = record.scores || {};
+  return (
+    [scores.dread, scores.intensity, scores.production, scores.pace].some(
+      (value) => numeric(value) != null
+    ) ||
+    Boolean(record.content?.synopsis || record.content?.why) ||
+    Boolean(record.content?.scare_type || record.intrinsic?.sub_genre)
+  );
 }
 
 const HARD_EXCLUSION_STATUSES = new Set([
@@ -75,27 +128,55 @@ function findCanonicalExclusion(movie, exclusions) {
   return exclusions.byTitleYear.get(makeKey(movie.title, movie.year)) || null;
 }
 
-// --- Load canonical hard exclusions ---
-function loadCanonicalExclusions() {
+// --- Load the single canonical film store ---
+function loadCanonicalRecords() {
   if (!existsSync(FILMS_JSONL_PATH)) {
     throw new Error(`Canonical film store not found: ${FILMS_JSONL_PATH}`);
   }
 
-  const exclusions = {
-    byTitleYear: new Map(),
-    byTmdbId: new Map(),
-    byImdbId: new Map(),
-  };
-  const lines = readFileSync(FILMS_JSONL_PATH, "utf-8").split("\n");
-  for (const [index, line] of lines.entries()) {
+  const source = readFileSync(FILMS_JSONL_PATH, "utf-8");
+  return parseCanonicalRecords(source, FILMS_JSONL_PATH);
+}
+
+function parseCanonicalRecords(source, sourceName = "films.jsonl") {
+  if (!source.trim()) {
+    throw new Error(`Canonical film store is empty: ${sourceName}`);
+  }
+  const records = [];
+  const ids = new Set();
+  for (const [index, line] of source.split("\n").entries()) {
     if (!line.trim()) continue;
     let record;
     try {
       record = JSON.parse(line);
     } catch (error) {
-      throw new Error(`Invalid JSON in ${FILMS_JSONL_PATH}:${index + 1}`, { cause: error });
+      throw new Error(`Invalid JSON in ${sourceName}:${index + 1}`, { cause: error });
     }
+    if (!record || typeof record.title !== "string" || !record.title.trim()) {
+      throw new Error(`Missing title in ${sourceName}:${index + 1}`);
+    }
+    if (!Number.isInteger(record.year)) {
+      throw new Error(`Invalid year in ${sourceName}:${index + 1}`);
+    }
+    if (typeof record.id !== "string" || !record.id || ids.has(record.id)) {
+      throw new Error(`Missing or duplicate id in ${sourceName}:${index + 1}`);
+    }
+    ids.add(record.id);
+    records.push(record);
+  }
 
+  console.log(`Loaded ${records.length} records from canonical films.jsonl`);
+  return records;
+}
+
+// --- Index canonical hard exclusions ---
+function loadCanonicalExclusions(records) {
+  const exclusions = {
+    byTitleYear: new Map(),
+    byTmdbId: new Map(),
+    byImdbId: new Map(),
+  };
+  for (const record of records) {
     const status = canonicalExclusionStatus(record);
     if (status) {
       const tmdbId = normalizeExternalId(record.tmdb_id ?? record.external_ids?.tmdb);
@@ -109,6 +190,9 @@ function loadCanonicalExclusions() {
         if (record.original_title) {
           exclusions.byTitleYear.set(makeKey(record.original_title, record.year), status);
         }
+        for (const alias of record.aliases || []) {
+          exclusions.byTitleYear.set(makeKey(alias, record.year), status);
+        }
       }
     }
   }
@@ -121,62 +205,17 @@ function loadCanonicalExclusions() {
   return exclusions;
 }
 
-// --- Load engine entries ---
-function loadEngineEntries() {
-  if (!existsSync(HORROR_100_PATH)) {
-    console.warn("WARN: horror-100.json not found at", HORROR_100_PATH);
-    return [];
-  }
-  const raw = JSON.parse(readFileSync(HORROR_100_PATH, "utf-8"));
-  const entries = raw.entries || [];
-  console.log(`Loaded ${entries.length} entries from horror-100.json`);
-  return entries;
-}
-
-// --- Load existing batch movies (already in Movie shape) ---
-function loadBatchMovies() {
-  const movies = [];
-  if (existsSync(BATCH2_PATH)) {
-    const batch2 = JSON.parse(readFileSync(BATCH2_PATH, "utf-8"));
-    if (Array.isArray(batch2)) movies.push(...batch2);
-    console.log(`Loaded ${batch2.length} movies from movies-batch2.json`);
-  }
-  return movies;
-}
-
-// --- Load seed batch (nested structure) ---
-function loadSeedBatch() {
-  if (!existsSync(MOVIES_JSON_PATH)) return [];
-  const raw = JSON.parse(readFileSync(MOVIES_JSON_PATH, "utf-8"));
-  const seedMovies = raw.movies || [];
-  console.log(`Loaded ${seedMovies.length} movies from seed batch`);
-  return seedMovies.map((m) => ({
-    title: m.title,
-    year: m.year,
-    director: m.director,
-    rating: m.letterboxd_rating ? Math.round(m.letterboxd_rating * 2.5 * 10) / 10 : 5.0,
-    genres: m.genre_tags || [],
-    categories: (m.dna || []).filter((d) =>
-      ["survival", "bunker", "psychological", "post-apocalyptic", "confined", "group-dynamics", "societal-collapse"].includes(d)
-    ),
-    dna: m.dna || [],
-    description: m.why_similar || "",
-    letterboxd: { top_positive: "", top_negative: "" },
-    whereToWatch: {
-      svod: m.streaming?.svod || [],
-      vod: [],
-      free: m.streaming?.avod || [],
-    },
-    sources: [],
-    tmdbId: null,
-  }));
-}
-
-// --- Merge engine data onto movies ---
-function enrichWithEngine(movies, engineEntries, canonicalExclusions) {
+// --- Merge canonical engine data onto movies ---
+function enrichWithEngine(movies, canonicalRecords, canonicalExclusions) {
   const engineByKey = new Map();
-  for (const entry of engineEntries) {
-    engineByKey.set(makeKey(entry.title, entry.year), entry);
+  for (const record of canonicalRecords) {
+    engineByKey.set(makeKey(record.title, record.year), record);
+    if (record.original_title) {
+      engineByKey.set(makeKey(record.original_title, record.year), record);
+    }
+    for (const alias of record.aliases || []) {
+      engineByKey.set(makeKey(alias, record.year), record);
+    }
   }
 
   const buildDate = new Date().toISOString().split("T")[0];
@@ -185,23 +224,36 @@ function enrichWithEngine(movies, engineEntries, canonicalExclusions) {
     const key = makeKey(movie.title, movie.year);
 
     // Engine enrichment
-    const eng = engineByKey.get(key);
-    if (eng) {
-      movie.scary = eng.scary;
-      movie.production = eng.production;
-      movie.extreme = eng.extreme;
-      movie.paceScore = eng.pace_score;
-      movie.pace = eng.pace;
-      movie.whyScary = eng.why_scary;
-      movie.scareType = eng.scare_type;
-      movie.subGenre = eng.sub_genre;
-      movie.wave = eng.wave;
-      movie.compositeScore = eng.composite_scare_weighted ?? eng.composite_current;
-      movie.defaultVisible = eng.default_visible;
-      movie.csvStatus = eng.csv_status;
-      movie.addedDate = movie.addedDate || buildDate;
-      if (eng.synopsis && (!movie.description || movie.description.length < 20)) {
-        movie.description = eng.synopsis;
+    const record = engineByKey.get(key);
+    if (record && hasRecommendationData(record)) {
+      const scores = record.scores || {};
+      movie.scary = numeric(scores.dread) ?? movie.scary;
+      movie.production = numeric(scores.production) ?? movie.production;
+      movie.extreme = numeric(scores.intensity) ?? movie.extreme;
+      movie.paceScore = numeric(scores.pace) ?? movie.paceScore;
+      movie.pace = paceLabel(scores.pace) ?? movie.pace;
+      movie.whyScary = record.content?.why || movie.whyScary;
+      movie.scareType = record.content?.scare_type || record.intrinsic?.sub_genre || movie.scareType;
+      movie.subGenre = record.intrinsic?.sub_genre || movie.subGenre;
+      movie.wave = record.surfaced_in?.at(-1) || movie.wave;
+      movie.compositeScore = compositeScore(record) ?? movie.compositeScore;
+      movie.defaultVisible = defaultVisible(record);
+      movie.csvStatus = canonicalStatus(record);
+      movie.addedDate = movie.addedDate || record.dates?.date_added || buildDate;
+      movie.posterPath = record.availability?.poster_path || movie.posterPath;
+      movie.tmdbId = normalizeExternalId(
+        record.tmdb_id ?? record.external_ids?.tmdb
+      ) || movie.tmdbId;
+      const streaming = record.availability?.streaming || [];
+      if (streaming.length && !movie.whereToWatch?.svod?.length) {
+        movie.whereToWatch = {
+          svod: streaming,
+          vod: movie.whereToWatch?.vod || [],
+          free: movie.whereToWatch?.free || [],
+        };
+      }
+      if (record.content?.synopsis && (!movie.description || movie.description.length < 20)) {
+        movie.description = record.content.synopsis;
       }
     }
 
@@ -215,100 +267,103 @@ function enrichWithEngine(movies, engineEntries, canonicalExclusions) {
   return movies;
 }
 
-// --- Deduplicate by title+year ---
-function deduplicate(movies) {
-  const seen = new Map();
-  for (const movie of movies) {
-    const key = makeKey(movie.title, movie.year);
-    if (!seen.has(key)) {
-      seen.set(key, movie);
-    } else {
-      const existing = seen.get(key);
-      const countFields = (m) => Object.values(m).filter((v) => v != null && v !== "").length;
-      if (countFields(movie) > countFields(existing)) {
-        seen.set(key, { ...existing, ...movie });
-      } else {
-        seen.set(key, { ...movie, ...existing });
-      }
-    }
-  }
-  return Array.from(seen.values());
+function deriveCategories(record) {
+  const source = [
+    record.intrinsic?.sub_genre,
+    record.content?.scare_type,
+    ...(record.tags || []),
+  ].filter(Boolean).join(" ").toLowerCase();
+  const categories = [];
+  if (source.includes("found footage")) categories.push("confined");
+  if (source.includes("possession") || source.includes("haunted")) categories.push("psychological");
+  if (source.includes("survival")) categories.push("survival");
+  if (source.includes("isolation") || source.includes("bunker")) categories.push("bunker");
+  if (source.includes("apocal")) categories.push("post-apocalyptic");
+  return categories.length ? categories : ["psychological"];
 }
 
-// --- Convert engine entries to Movie shape ---
-function engineToMovies(engineEntries, existingKeys) {
+function fallbackRating(record) {
+  const composite = compositeScore(record);
+  if (composite != null) return composite;
+
+  const letterboxd = numeric(record.availability?.letterboxd_rating);
+  if (letterboxd != null) return Math.round(letterboxd * 2 * 10) / 10;
+
+  const scored = [
+    record.scores?.dread,
+    record.scores?.intensity,
+    record.scores?.production,
+    record.scores?.pace,
+  ].map(numeric).filter((value) => value != null);
+  return scored.length
+    ? Math.round((scored.reduce((sum, value) => sum + value, 0) / scored.length) * 100) / 100
+    : 5.0;
+}
+
+// --- Convert canonical records to Movie shape ---
+function engineToMovies(canonicalRecords, existingKeys) {
   const buildDate = new Date().toISOString().split("T")[0];
   const newMovies = [];
 
-  for (const eng of engineEntries) {
-    const key = makeKey(eng.title, eng.year);
+  for (const record of canonicalRecords) {
+    const key = makeKey(record.title, record.year);
     if (existingKeys.has(key)) continue; // already in app
 
-    // Derive categories from sub_genre and scare_type
-    const cats = [];
-    const sg = (eng.sub_genre || "").toLowerCase();
-    if (sg.includes("found footage")) cats.push("confined");
-    if (sg.includes("possession") || sg.includes("haunted")) cats.push("psychological");
-    if (sg.includes("survival")) cats.push("survival");
-    if (sg.includes("isolation") || sg.includes("bunker")) cats.push("bunker");
-    if (sg.includes("apocal")) cats.push("post-apocalyptic");
-    if (cats.length === 0) cats.push("psychological"); // default bucket
+    const scores = record.scores || {};
+    const subGenre = record.intrinsic?.sub_genre;
+    const scareType = record.content?.scare_type || subGenre;
+    const dna = [...new Set([scareType, subGenre, ...(record.tags || [])].filter(Boolean))];
+    const composite = compositeScore(record);
 
     newMovies.push({
-      title: eng.title,
-      year: eng.year,
-      director: eng.director,
-      rating: eng.composite_scare_weighted ?? eng.composite_current ?? 5.0,
-      genres: [eng.sub_genre || "Horror"],
-      categories: cats,
-      dna: [eng.scare_type || "horror", eng.sub_genre || ""].filter(Boolean),
-      description: eng.synopsis || "",
+      title: record.title,
+      year: record.year,
+      director: record.intrinsic?.director || "",
+      rating: fallbackRating(record),
+      genres: [record.intrinsic?.genre || subGenre || "Horror"],
+      categories: deriveCategories(record),
+      dna: dna.length ? dna : ["horror"],
+      description: record.content?.synopsis || record.content?.one_line || record.content?.premise || "",
       letterboxd: { top_positive: "", top_negative: "" },
       whereToWatch: {
-        svod: eng.streaming ? [eng.streaming] : [],
+        svod: record.availability?.streaming || [],
         vod: [],
         free: [],
       },
       sources: [],
-      tmdbId: null,
-      scary: eng.scary,
-      production: eng.production,
-      extreme: eng.extreme,
-      paceScore: eng.pace_score,
-      pace: eng.pace,
-      whyScary: eng.why_scary,
-      scareType: eng.scare_type,
-      subGenre: eng.sub_genre,
-      wave: eng.wave,
-      addedDate: buildDate,
-      compositeScore: eng.composite_scare_weighted ?? eng.composite_current,
-      defaultVisible: eng.default_visible,
-      csvStatus: eng.csv_status,
+      tmdbId: normalizeExternalId(record.tmdb_id ?? record.external_ids?.tmdb),
+      scary: numeric(scores.dread) ?? undefined,
+      production: numeric(scores.production) ?? undefined,
+      extreme: numeric(scores.intensity) ?? undefined,
+      paceScore: numeric(scores.pace) ?? undefined,
+      pace: paceLabel(scores.pace),
+      whyScary: record.content?.why || undefined,
+      scareType: scareType || undefined,
+      subGenre: subGenre || undefined,
+      wave: record.surfaced_in?.at(-1),
+      addedDate: record.dates?.date_added || buildDate,
+      compositeScore: composite ?? undefined,
+      defaultVisible: defaultVisible(record),
+      csvStatus: canonicalStatus(record),
+      posterPath: record.availability?.poster_path || undefined,
     });
   }
 
-  console.log(`${newMovies.length} new movies from engine (not in existing batches)`);
+  console.log(`${newMovies.length} new movies from canonical engine data (not in existing batches)`);
   return newMovies;
 }
 
 // --- Main ---
 function main() {
-  const canonicalExclusions = loadCanonicalExclusions();
-  const engineEntries = loadEngineEntries();
-  const seedMovies = loadSeedBatch();
-  const batchMovies = loadBatchMovies();
-
-  // Combine: batch movies first (better shape), then seed
-  let allMovies = deduplicate([...batchMovies, ...seedMovies]);
-  console.log(`${allMovies.length} unique movies after dedup`);
-
-  // Add engine-only entries as new movies
-  const existingKeys = new Set(allMovies.map((m) => makeKey(m.title, m.year)));
-  const engineMovies = engineToMovies(engineEntries, existingKeys);
-  allMovies = [...allMovies, ...engineMovies];
+  const canonicalRecords = loadCanonicalRecords();
+  const canonicalExclusions = loadCanonicalExclusions(canonicalRecords);
+  const recommendationRecords = canonicalRecords.filter(
+    (record) => !canonicalExclusionStatus(record) && hasRecommendationData(record)
+  );
+  let allMovies = engineToMovies(recommendationRecords, new Set());
 
   // Enrich ALL movies with engine data + canonical exclusion status.
-  allMovies = enrichWithEngine(allMovies, engineEntries, canonicalExclusions);
+  allMovies = enrichWithEngine(allMovies, canonicalRecords, canonicalExclusions);
 
   // Filter out default_visible=false from engine (subtitle-only)
   allMovies = allMovies.filter((m) => m.defaultVisible !== false);
@@ -337,4 +392,14 @@ function main() {
   console.log(`Wrote ${allMovies.length} movies to ${OUTPUT_PATH}`);
 }
 
-main();
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main();
+}
+
+export {
+  canonicalExclusionStatus,
+  engineToMovies,
+  findCanonicalExclusion,
+  loadCanonicalExclusions,
+  parseCanonicalRecords,
+};

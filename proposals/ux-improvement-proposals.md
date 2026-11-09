@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-11
 **Author:** movie-rec node
-**Context:** UNCUT is a Next.js static app (hero + browse rows + detail overlay + tab bar) with a localStorage behavior model (save / skip / seen / expand + DNA-tag similarity ranking). The content engine at `~/active-projects/content-engine/` owns `horror-100.json` (ranked horror DB with scary/production/extreme/pace/nudity/depravity + sub_genre + synopsis + why_scary + scare_type + language + streaming + mpaa_rating + csv_status + composite scores + default_visible) and `watched-films.csv` (4,793 entries from Ria's Letterboxd). UNCUT's current `Movie` type is much thinner than the engine schema — most of the proposals below close that gap and turn static rows into a living feed.
+**Context:** UNCUT is a Next.js static app (hero + browse rows + detail overlay + tab bar) with a localStorage behavior model (save / skip / seen / expand + DNA-tag similarity ranking). The content engine's single canonical store is `../content-engine/data/films.jsonl`: one record per film with taste scores, content notes, availability, provenance, and structured operator signals for watched/DNF/DNR/reviewed state. UNCUT's current `Movie` type is much thinner than the engine schema — most of the proposals below close that gap and turn static rows into a living feed.
 
 ---
 
@@ -12,7 +12,7 @@
 
 **Implementation sketch.** Add a compact dial panel at the top of the browse view (collapses into the tab bar on scroll) with three sliders: Scare (1–10), Extreme (1–10), Pace (slow → fast). Dials persist to localStorage alongside `BehaviorState`. `rankMovies()` takes the dial values as inputs and filters + re-weights before returning. Dial state also biases the hero pick.
 
-**Content-engine coordination.** Requires `scary`, `extreme`, `pace_score`, `composite_scare_weighted` to flow into UNCUT's `Movie` type. Add a `src/lib/engineSync.ts` that imports the engine JSON at build time and maps engine fields → `Movie` (schema-mapped, not cloned). Filter applied: `scary ≥ dial.scare - 1 && extreme ≤ dial.extreme + 1 && pace_score matches`.
+**Content-engine coordination.** `scripts/sync-engine.mjs` maps canonical `scores.dread`, `scores.intensity`, and `scores.pace` into UNCUT's existing `scary`, `extreme`, and `paceScore` fields and derives the display composite at build time. Filter applied: `scary ≥ dial.scare - 1 && extreme ≤ dial.extreme + 1 && paceScore matches`.
 
 **Effort:** 6h
 
@@ -24,7 +24,7 @@
 
 **Implementation sketch.** Add a pinned section to `DetailOverlay.tsx` titled "Why it hits" that renders `why_scary` + `scare_type` from the engine, styled as a bold pull-quote. Below it, a row of three chip readouts: Scare · Extreme · Pace, each with a filled dot bar (1–10). Keep existing Letterboxd quotes beneath.
 
-**Content-engine coordination.** New fields on `Movie`: `whyScary: string`, `scareType: string`, `scary/production/extreme/pace_score: number`. Map from `horror-100.json` entries. These are already authored in the DB — zero new writing work.
+**Content-engine coordination.** New fields on `Movie`: `whyScary: string`, `scareType: string`, `scary/production/extreme/pace_score: number`. Map from the canonical record's `content`, `intrinsic`, and `scores` zones. These are already authored in `films.jsonl` — zero new writing work.
 
 **Effort:** 3h
 
@@ -34,9 +34,9 @@
 
 **Problem.** Ria has 4,793 watched films in Letterboxd. UNCUT surfaces movies she's already seen because it only knows what *she marked seen in this app* (a near-empty set). Every watched-film impression is a wasted row.
 
-**Implementation sketch.** At build time, join `watched-films.csv` against the movie list by `(title, year)` normalized match. Matched rows get `watchedByRia: true`. By default they're filtered out of the feed. Add a "Already seen" row at the bottom of Browse that's collapsed by default — taps expand to show the ledger for nostalgia / re-recommendation signaling. Saving a watched film still records the save.
+**Implementation sketch.** At build time, join canonical film records against the movie list by external ID first, then normalized `(title, year)`. Records with `operator.watched`, DNF, DNR, quarantine, or retirement signals are excluded from the feed. Add an "Already seen" row at the bottom of Browse that's collapsed by default — taps expand to show the watched ledger for nostalgia / re-recommendation signaling. Saving a watched film still records the save.
 
-**Content-engine coordination.** Read `watched-films.csv` directly in a build script (`scripts/sync-watched.mjs`). Mirror the engine's `csv_status` field: `ELIGIBLE | WATCHED | REVIEWED`. Flag any unmatched titles to a `data/unmatched-watched.txt` so the content engine can improve its canonicalization.
+**Content-engine coordination.** `scripts/sync-engine.mjs` reads `films.jsonl` once and derives display status from its structured operator signals. Alias, original-title, TMDB, and IMDb matching come from the same record, so a second watched-data sync and a second source of truth are unnecessary.
 
 **Effort:** 5h
 
@@ -46,9 +46,9 @@
 
 **Problem.** The app feels static. Ria opens it, sees the same rows, closes it. The content engine is *continuously* adding vetted films but UNCUT has no surface for freshness.
 
-**Implementation sketch.** Add a "Fresh from the crypt" hero strip above the main rows that shows films added to `horror-100.json` in the last 14 days, animated in with a small "NEW" pulse (GSAP). Add a build timestamp + "N new this week" badge in the tab bar. Use the existing `isFresh` logic in `behavior.ts` — it already looks for `addedDate` but nothing writes it today.
+**Implementation sketch.** Add a "Fresh from the crypt" hero strip above the main rows that shows films whose canonical `dates.date_added` falls in the last 14 days, animated in with a small "NEW" pulse (GSAP). Add a build timestamp + "N new this week" badge in the tab bar. The existing sync projects that date into `Movie.addedDate`, which the existing `isFresh` logic in `behavior.ts` already reads.
 
-**Content-engine coordination.** The engine entries already carry a `wave` field (e.g. `"G-scare"`). Add a `first_seen_iso` field on engine write, then project into `Movie.addedDate`. Requires one line change in the engine's write script and the existing freshness UI lights up automatically.
+**Content-engine coordination.** The canonical record already carries `surfaced_in` provenance and `dates.date_added`; sync projects the latest source tag into `Movie.wave` and the stable date into `Movie.addedDate`. No parallel freshness field is needed.
 
 **Effort:** 4h
 
@@ -60,7 +60,7 @@
 
 **Implementation sketch.** Add a settings sheet accessible from the tab bar where Ria picks her active services (Netflix, Shudder, Max, Prime, AppleTV+, etc.). Persist to localStorage. In Browse, films available on a subscribed service get a subtle green "▸ Netflix" affordance at the bottom-right of the poster. A "Only streaming" toggle in the dial panel (Proposal 1) hard-filters the feed.
 
-**Content-engine coordination.** Engine's `streaming` field is already a free-text hint (`"Netflix"`, `"Shudder / AMC+"`). Parse into a normalized `streamingServices: string[]` during engine-sync. Flag entries with stale/missing streaming data back to the engine via `data/streaming-gaps.json` so the content pipeline can refresh.
+**Content-engine coordination.** Canonical `availability.streaming` is already an array and sync maps it into `whereToWatch.svod`. Flag records with stale/missing availability back to the engine so the content pipeline can refresh the same canonical record.
 
 **Effort:** 7h
 
@@ -82,9 +82,9 @@
 
 **Problem.** Skip is a dead-end signal today: `rankMovies()` just drops skipped items to the bottom. No explanation, no learning loop, no dignity for the skip. Ria feels like she's fighting the feed instead of teaching it.
 
-**Implementation sketch.** On skip, show a 3-option micro-sheet: "Too slow", "Too gory", "Seen it". Record the reason into `MovieSignals.skipReason`. Feed the reason back into ranking: "Too slow" skips on 2+ movies → demote `pace === "slow"` globally for the session. "Too gory" → demote `extreme ≥ 8`. "Seen it" → mark `seen: true` AND write to a pending `ria-corrections.csv` so the content engine can patch `watched-films.csv`.
+**Implementation sketch.** On skip, show a 3-option micro-sheet: "Too slow", "Too gory", "Seen it". Record the reason into `MovieSignals.skipReason`. Feed the reason back into ranking: "Too slow" skips on 2+ movies → demote `pace === "slow"` globally for the session. "Too gory" → demote `extreme ≥ 8`. "Seen it" → mark `seen: true` and queue a canonical operator-signal correction for the content engine.
 
-**Content-engine coordination.** Produces a feedback loop *back* into the content engine. The `ria-corrections.csv` file is picked up by the engine's CSV maintenance script and merged into `watched-films.csv`. Closes the loop so the app gets smarter AND the engine's ground truth improves.
+**Content-engine coordination.** Produces a feedback loop *back* into the content engine. Pending corrections must be applied through the engine's canonical film-store commands so the structured operator signal lands in `films.jsonl`. This closes the loop without reviving a parallel CSV source of truth.
 
 **Effort:** 6h
 
@@ -108,7 +108,7 @@
 
 **Implementation sketch.** Rewrite `HeroSection.tsx` to pick dynamically at mount based on: (a) time of day — after 9pm, boost `scary ≥ 8`; before 9pm, boost `scary 6–7`; (b) unwatched saved items — if Ria has saved ≥3 unwatched films, rotate them through the hero first; (c) fresh arrivals — new wave entries get a guaranteed hero slot once. Cross-fade between picks on a 12-second timer (pausable on hover/tap) with GSAP.
 
-**Content-engine coordination.** Uses `scary`, `composite_scare_weighted`, `wave`, and the `first_seen_iso` from Proposal 4. No new engine fields. The hero rotation is 100% derived from engine data + local behavior — no server, no config.
+**Content-engine coordination.** Uses the synced `scary`, derived `compositeScore`, provenance-derived `wave`, and canonical `dates.date_added` from Proposal 4. No new engine fields. The hero rotation is 100% derived from canonical engine data + local behavior — no server, no config.
 
 **Effort:** 6h
 
@@ -143,4 +143,4 @@
 
 **Total effort:** 55 hours. Proposals 2, 3, 4, 8 are the highest-leverage engine-integration wins and can land as a single 17-hour first wave. Proposals 1, 6, 9 form a second wave (20h) that transforms the browse model. Proposals 5, 7, 10 are the polish wave (18h).
 
-**Cross-cutting prerequisite:** A shared build-time script (`scripts/sync-engine.mjs`) that reads `~/active-projects/content-engine/horror-100.json` + `watched-films.csv` and emits `src/data/movies.generated.json`. Every proposal above assumes this exists. It's a 2h job and should land before wave 1.
+**Cross-cutting prerequisite:** `scripts/sync-engine.mjs` now reads only `../content-engine/data/films.jsonl` and emits `src/data/engine-movies.json`. It fails the build when the canonical store is missing, empty, or malformed, and applies canonical hard exclusions before writing the static payload.

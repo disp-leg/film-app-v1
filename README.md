@@ -73,7 +73,7 @@ Additional scoring:
 
 Skipped movies can be un-skipped. Seen movies are hidden. State persists in localStorage under `movie-rec-behavior`.
 
-On first visit, all movies display in the curated order from `data/movies.json` (base score 100).
+On first visit, movies come from the generated `src/data/engine-movies.json` payload (base score 100).
 
 ### Content Pipeline
 
@@ -107,7 +107,7 @@ Movies are sourced from real human recommendations, not algorithms.
 
 ### Poster Images
 
-Poster paths are stored in `data/movies.json` as `posterPath` fields. The `src/lib/posters.ts` module builds full TMDB URLs:
+Poster paths originate in the canonical content-engine `data/films.jsonl` records. The `src/lib/posters.ts` module builds full TMDB URLs:
 
 ```
 https://image.tmdb.org/t/p/w500/{posterPath}
@@ -121,8 +121,7 @@ https://image.tmdb.org/t/p/w500/{posterPath}
 
 | File | Contents |
 |------|----------|
-| `data/movies.json` | 26 validated movies with full metadata + TMDB poster paths |
-| `data/movies-batch2.json` | Batch 2 raw data (pre-merge) |
+| `src/data/engine-movies.json` | Generated app payload; `npm run sync` rebuilds it from canonical content-engine `data/films.jsonl` |
 | `data/design-research.md` | Reference app analysis (Retro MP3, Bop, Pool) |
 | `data/ux-spec.md` | UX specification |
 | `data/mockup.drawio` | draw.io wireframe mockup |
